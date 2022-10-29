@@ -13,8 +13,8 @@ lazy_static! {
     static ref WIND_DIRECTION: Regex = Regex::new("([0-9]{1,3})°").unwrap();
 }
 
-#[derive(Serialize, Deserialize)]
-struct Observation {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Observation {
     time: DateTime<FixedOffset>,
     direction: u16,
     avg_speed: f32,
@@ -22,7 +22,7 @@ struct Observation {
     min_speed: f32,
 }
 
-fn parse(input: &str) -> Vec<Observation> {
+pub fn parse(input: &str) -> Vec<Observation> {
     let document = Document::from(input);
     let selector = Name("table").descendant(Name("tr"));
     let rows = document.find(selector);
@@ -33,7 +33,6 @@ fn parse(input: &str) -> Vec<Observation> {
             // skippping header
             continue;
         }
-        println!("{}", row.html());
         let mut columns = row.find(Name("td"));
         let time = parse_column(&mut columns, vlat_time_parser);
         let direction = parse_column(&mut columns, direction_parser);
