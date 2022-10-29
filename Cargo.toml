@@ -10,8 +10,10 @@ chrono = { version = "0.4.22", features = ["serde"] }
 chrono-tz = "0.7.0"
 lazy_static = "1.4.0"
 regex = "1.6.0"
+reqwest = "0.11.12"
 select = "0.5.0"
 serde = { version = "1.0.147", features = ["derive"] }
+tokio = { version = "1.21.2", features = ["rt", "macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 insta = { version = "1.21.0", features = ["yaml"] }
