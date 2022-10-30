@@ -15,11 +15,9 @@ lazy_static! {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Observation {
-    time: DateTime<FixedOffset>,
-    direction: u16,
-    avg_speed: f32,
-    max_speed: f32,
-    min_speed: f32,
+    pub time: DateTime<FixedOffset>,
+    pub direction: u16,
+    pub avg_speed: f32,
 }
 
 pub fn parse(input: &str) -> Vec<Observation> {
@@ -37,19 +35,13 @@ pub fn parse(input: &str) -> Vec<Observation> {
         let time = parse_column(&mut columns, vlat_time_parser);
         let direction = parse_column(&mut columns, direction_parser);
         let avg_speed = parse_column(&mut columns, wind_speed_parser);
-        let max_speed = parse_column(&mut columns, wind_speed_parser);
-        let min_speed = parse_column(&mut columns, wind_speed_parser);
 
-        match (time, direction, avg_speed, max_speed, min_speed) {
-            (Some(time), Some(direction), Some(avg_speed), Some(max_speed), Some(min_speed)) => {
-                result.push(Observation {
-                    time,
-                    direction,
-                    avg_speed,
-                    max_speed,
-                    min_speed,
-                })
-            }
+        match (time, direction, avg_speed) {
+            (Some(time), Some(direction), Some(avg_speed)) => result.push(Observation {
+                time,
+                direction,
+                avg_speed,
+            }),
             _ => {
                 panic!("Unable to parse: {}", row.html())
             }
