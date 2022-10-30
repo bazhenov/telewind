@@ -16,7 +16,7 @@ async fn main() {
     let opts = Opts::parse();
     let body = reqwest::get(opts.url).await.unwrap().text().await.unwrap();
 
-    let mut fsm = EventTrackingFsm {
+    let mut fsm = TrackingFsm {
         state: State::Low,
         candidate_steps: 2,
         cooldown_steps: 2,
@@ -51,14 +51,14 @@ enum State {
     Cooldown(u8),
 }
 
-struct EventTrackingFsm {
+struct TrackingFsm {
     state: State,
     candidate_steps: u8,
     cooldown_steps: u8,
     avg_speed_threshold: f32,
 }
 
-impl EventTrackingFsm {
+impl TrackingFsm {
     fn step(&mut self, observation: &Observation) -> State {
         use State::*;
 
@@ -90,7 +90,7 @@ impl EventTrackingFsm {
 }
 
 /// Circle sector
-/// 
+///
 /// Can test if given angle (0-350 deg.) is in circle sector.
 /// Sector is defined as two angles (from angle and to angle). Two angles
 /// always given in clockwise order, so `Sector::new(270, 90)` is upper half circle and
@@ -137,12 +137,12 @@ mod test {
     fn new_seq_and_fsm(
         candidate_steps: u8,
         cooldown_steps: u8,
-    ) -> (ObservationSequence, EventTrackingFsm) {
+    ) -> (ObservationSequence, TrackingFsm) {
         let seq = ObservationSequence {
             time: DateTime::parse_from_rfc3339("2022-02-01T00:00:00+10:00").unwrap(),
         };
 
-        let fsm = EventTrackingFsm {
+        let fsm = TrackingFsm {
             state: State::Low,
             candidate_steps,
             cooldown_steps,
