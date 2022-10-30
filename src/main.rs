@@ -89,6 +89,29 @@ impl EventTrackingFsm {
     }
 }
 
+/// Circle sector
+/// 
+/// Can test if given angle (0-350 deg.) is in circle sector.
+/// Sector is defined as two angles (from angle and to angle). Two angles
+/// always given in clockwise order, so `Sector::new(270, 90)` is upper half circle and
+/// `Sector::new(90, 270)` is lower.
+struct Sector(u16, u16);
+
+impl Sector {
+    fn new(angle_from: u16, angle_to: u16) -> Self {
+        Self(angle_from, angle_to)
+    }
+
+    fn test(&self, angle: u16) -> bool {
+        let angle = angle % 360;
+        if self.0 <= self.1 {
+            self.0 <= angle && angle <= self.1
+        } else {
+            self.0 <= angle || angle <= self.1
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
 
@@ -156,5 +179,27 @@ mod test {
         assert_eq!(fsm.step(&seq.next(5.7, 20)), State::High);
         assert_eq!(fsm.step(&seq.next(3.7, 20)), State::Cooldown(1));
         assert_eq!(fsm.step(&seq.next(5.4, 20)), State::High);
+    }
+
+    #[test]
+    fn sector() {
+        let sector = Sector::new(0, 45);
+
+        assert_eq!(true, sector.test(0));
+        assert_eq!(true, sector.test(30));
+        assert_eq!(true, sector.test(45));
+
+        assert_eq!(false, sector.test(46));
+        assert_eq!(false, sector.test(359));
+
+        let sector = Sector::new(280, 90);
+
+        assert_eq!(true, sector.test(290));
+        assert_eq!(true, sector.test(0));
+        assert_eq!(true, sector.test(45));
+        assert_eq!(true, sector.test(90));
+
+        assert_eq!(false, sector.test(180));
+        assert_eq!(false, sector.test(279));
     }
 }
