@@ -9,6 +9,9 @@ struct Opts {
     /// source url to download
     #[arg(short, long, default_value_t = String::from("http://3volna.ru/anemometer/getwind?id=1"))]
     url: String,
+
+    #[arg(short, long, default_value_t = 5.0)]
+    speed: f32,
 }
 
 #[tokio::main]
@@ -18,9 +21,10 @@ async fn main() {
 
     let mut fsm = TrackingFsm {
         state: State::Low,
+        wind_sector: Sector::EAST_90,
         candidate_steps: 2,
         cooldown_steps: 2,
-        avg_speed_threshold: 3.0,
+        avg_speed_threshold: opts.speed,
     };
 
     let mut observations = parse(&body);
@@ -53,6 +57,7 @@ enum State {
 
 struct TrackingFsm {
     state: State,
+    wind_sector: Sector,
     candidate_steps: u8,
     cooldown_steps: u8,
     avg_speed_threshold: f32,
@@ -62,7 +67,9 @@ impl TrackingFsm {
     fn step(&mut self, observation: &Observation) -> State {
         use State::*;
 
-        self.state = if observation.avg_speed >= self.avg_speed_threshold {
+        let direction_match = self.wind_sector.test(observation.direction);
+        let speed_match = observation.avg_speed >= self.avg_speed_threshold;
+        self.state = if speed_match && direction_match {
             match self.state {
                 High => High,
                 Low if self.candidate_steps == 0 => High,
@@ -98,6 +105,11 @@ impl TrackingFsm {
 struct Sector(u16, u16);
 
 impl Sector {
+    const NORTH_90: Sector = Sector(315, 45);
+    const EAST_90: Sector = Sector(45, 135);
+    const SOUTH_90: Sector = Sector(135, 225);
+    const WEST_90: Sector = Sector(225, 315);
+
     fn new(angle_from: u16, angle_to: u16) -> Self {
         Self(angle_from, angle_to)
     }
@@ -144,6 +156,7 @@ mod test {
 
         let fsm = TrackingFsm {
             state: State::Low,
+            wind_sector: Sector(135, 225), // SE-SW
             candidate_steps,
             cooldown_steps,
             avg_speed_threshold: 5.0,
@@ -155,30 +168,38 @@ mod test {
     fn fsm_full_cycle() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(3.2, 20)), State::Low);
-        assert_eq!(fsm.step(&seq.next(5.7, 20)), State::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 20)), State::Candidate(2));
-        assert_eq!(fsm.step(&seq.next(5.4, 20)), State::High);
-        assert_eq!(fsm.step(&seq.next(3.5, 20)), State::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(3.5, 20)), State::Cooldown(2));
-        assert_eq!(fsm.step(&seq.next(4.1, 20)), State::Low);
+        assert_eq!(fsm.step(&seq.next(3.2, 180)), State::Low);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::Candidate(2));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::High);
+        assert_eq!(fsm.step(&seq.next(3.5, 180)), State::Cooldown(1));
+        assert_eq!(fsm.step(&seq.next(3.5, 180)), State::Cooldown(2));
+        assert_eq!(fsm.step(&seq.next(4.1, 180)), State::Low);
+    }
+
+    #[test]
+    fn fsm_directorion_mismatch() {
+        let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
+
+        assert_eq!(fsm.step(&seq.next(5.0, 180)), State::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(5.0, 0)), State::Low);
     }
 
     #[test]
     fn fsm_candidate_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 20)), State::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(3.4, 20)), State::Low);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(3.4, 180)), State::Low);
     }
 
     #[test]
     fn fsm_cooldown_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(0, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 20)), State::High);
-        assert_eq!(fsm.step(&seq.next(3.7, 20)), State::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 20)), State::High);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::High);
+        assert_eq!(fsm.step(&seq.next(3.7, 180)), State::Cooldown(1));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::High);
     }
 
     #[test]
