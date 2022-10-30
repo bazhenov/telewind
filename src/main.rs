@@ -16,8 +16,30 @@ async fn main() {
     let opts = Opts::parse();
     let body = reqwest::get(opts.url).await.unwrap().text().await.unwrap();
 
-    for observation in parse(&body) {
-        println!("{observation:?}")
+    let mut fsm = EventTrackingFsm {
+        state: State::Low,
+        candidate_steps: 2,
+        cooldown_steps: 2,
+        avg_speed_threshold: 3.0,
+    };
+
+    let mut observations = parse(&body);
+    observations.reverse();
+    for observation in observations {
+        let from_state = fsm.state();
+        let to_state = fsm.step(&observation);
+
+        let event_fired = match (from_state, to_state) {
+            (State::Low, State::High) => true,
+            (State::Candidate(..), State::High) => true,
+            _ => false,
+        };
+        println!(
+            "{time}   {wind:2.1}m/s  {direction:3}° {event_fired:>6}    {to_state:?}",
+            time = observation.time,
+            wind = observation.avg_speed,
+            direction = observation.direction
+        )
     }
 }
 
