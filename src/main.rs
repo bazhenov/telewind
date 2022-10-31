@@ -34,8 +34,8 @@ async fn main() {
     let opts = Opts::parse();
     let body = reqwest::get(opts.url).await.unwrap().text().await.unwrap();
 
-    let mut fsm = TrackingFsm {
-        state: State::Low,
+    let mut fsm = WindTracker {
+        state: WindState::Low,
         wind_sector: Sector::EAST_90,
         candidate_steps: 2,
         cooldown_steps: 2,
@@ -49,8 +49,8 @@ async fn main() {
         let to_state = fsm.step(&observation);
 
         let event_fired = match (from_state, to_state) {
-            (State::Low, State::High) => true,
-            (State::Candidate(..), State::High) => true,
+            (WindState::Low, WindState::High) => true,
+            (WindState::Candidate(..), WindState::High) => true,
             _ => false,
         };
         println!(
@@ -63,24 +63,32 @@ async fn main() {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum State {
+enum WindState {
     Low,
     Candidate(u8),
     High,
     Cooldown(u8),
 }
 
-struct TrackingFsm {
-    state: State,
+/// Wind state tracking FSM
+///
+/// Implements hysterizis. Given number of observations (steps) are required for FSM to reach [`WindState::High`] state
+/// (and reset to [`WindState::Low`] state). [`WindState::Candidate`] and [`WindState::Cooldown`] are transient states
+/// created just for that reason.
+struct WindTracker {
+    state: WindState,
     wind_sector: Sector,
+    /// Number of steps require for FSM to reach [`WindState::High`] from [`WindState::Low`]
     candidate_steps: u8,
+    /// Number of steps require for FSM to reset from [`WindState::High`] to [`WindState::Low`]
     cooldown_steps: u8,
+    /// Target threshold for wind speed
     avg_speed_threshold: f32,
 }
 
-impl TrackingFsm {
-    fn step(&mut self, observation: &Observation) -> State {
-        use State::*;
+impl WindTracker {
+    fn step(&mut self, observation: &Observation) -> WindState {
+        use WindState::*;
 
         let direction_match = self.wind_sector.test(observation.direction);
         let speed_match = observation.avg_speed >= self.avg_speed_threshold;
@@ -106,7 +114,7 @@ impl TrackingFsm {
         self.state
     }
 
-    fn state(&self) -> State {
+    fn state(&self) -> WindState {
         self.state
     }
 }
@@ -143,8 +151,8 @@ struct NotificationLoop;
 
 impl NotificationLoop {
     async fn run(&mut self) {
-        let mut fsm = TrackingFsm {
-            state: State::Low,
+        let mut fsm = WindTracker {
+            state: WindState::Low,
             avg_speed_threshold: 1.0,
             candidate_steps: 2,
             cooldown_steps: 2,
@@ -177,8 +185,8 @@ impl NotificationLoop {
                 trace!("Processing new observation: {}", obs);
 
                 let event_fired = match (fsm.state(), fsm.step(&obs)) {
-                    (State::Low, State::High) => true,
-                    (State::Candidate(..), State::High) => true,
+                    (WindState::Low, WindState::High) => true,
+                    (WindState::Candidate(..), WindState::High) => true,
                     _ => false,
                 };
 
@@ -229,13 +237,13 @@ mod test {
     fn new_seq_and_fsm(
         candidate_steps: u8,
         cooldown_steps: u8,
-    ) -> (ObservationSequence, TrackingFsm) {
+    ) -> (ObservationSequence, WindTracker) {
         let seq = ObservationSequence {
             time: DateTime::parse_from_rfc3339("2022-02-01T00:00:00+10:00").unwrap(),
         };
 
-        let fsm = TrackingFsm {
-            state: State::Low,
+        let fsm = WindTracker {
+            state: WindState::Low,
             wind_sector: Sector(135, 225), // SE-SW
             candidate_steps,
             cooldown_steps,
@@ -248,38 +256,38 @@ mod test {
     fn fsm_full_cycle() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(3.2, 180)), State::Low);
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::Candidate(2));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::High);
-        assert_eq!(fsm.step(&seq.next(3.5, 180)), State::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(3.5, 180)), State::Cooldown(2));
-        assert_eq!(fsm.step(&seq.next(4.1, 180)), State::Low);
+        assert_eq!(fsm.step(&seq.next(3.2, 180)), WindState::Low);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::Candidate(2));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::High);
+        assert_eq!(fsm.step(&seq.next(3.5, 180)), WindState::Cooldown(1));
+        assert_eq!(fsm.step(&seq.next(3.5, 180)), WindState::Cooldown(2));
+        assert_eq!(fsm.step(&seq.next(4.1, 180)), WindState::Low);
     }
 
     #[test]
     fn fsm_directorion_mismatch() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.0, 180)), State::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(5.0, 0)), State::Low);
+        assert_eq!(fsm.step(&seq.next(5.0, 180)), WindState::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(5.0, 0)), WindState::Low);
     }
 
     #[test]
     fn fsm_candidate_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(3.4, 180)), State::Low);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::Candidate(1));
+        assert_eq!(fsm.step(&seq.next(3.4, 180)), WindState::Low);
     }
 
     #[test]
     fn fsm_cooldown_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(0, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), State::High);
-        assert_eq!(fsm.step(&seq.next(3.7, 180)), State::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), State::High);
+        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::High);
+        assert_eq!(fsm.step(&seq.next(3.7, 180)), WindState::Cooldown(1));
+        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::High);
     }
 
     #[test]
