@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use chrono::{DateTime, FixedOffset, TimeZone};
 use chrono_tz::Asia::Vladivostok;
 use lazy_static::lazy_static;
@@ -18,6 +20,18 @@ pub struct Observation {
     pub time: DateTime<FixedOffset>,
     pub direction: u16,
     pub avg_speed: f32,
+}
+
+impl Display for Observation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {:2.1} m/s {:3}°",
+            self.time.format("%H:%M"),
+            self.avg_speed,
+            self.direction
+        )
+    }
 }
 
 pub fn parse(input: &str) -> Vec<Observation> {
