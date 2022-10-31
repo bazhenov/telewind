@@ -1,12 +1,18 @@
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::{trace, warn};
 use parser::{parse, Observation};
-use tokio::time::{sleep, sleep_until};
+use tokio::time::sleep;
 
 mod parser;
+
+#[derive(Parser)]
+struct Args {
+    #[command(subcommand)]
+    action: Action,
+}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -19,20 +25,29 @@ struct Opts {
     speed: f32,
 }
 
-#[tokio::main]
-async fn main2() {
-    env_logger::init();
-
-    let mut luup = NotificationLoop;
-    luup.run().await
+#[derive(Debug, Subcommand)]
+#[clap(author, version, about, long_about = None)]
+enum Action {
+    /// parse remote url
+    Parse(Opts),
+    /// running notification loop
+    Run(Opts),
 }
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let opts = Opts::parse();
-    let body = reqwest::get(opts.url).await.unwrap().text().await.unwrap();
+    let args = Args::parse();
+
+    match args.action {
+        Action::Parse(opts) => run_parse(&opts).await,
+        Action::Run(opts) => run_notification_loop(&opts).await,
+    }
+}
+
+async fn run_parse(opts: &Opts) {
+    let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
 
     let mut fsm = WindTracker {
         state: WindState::Low,
@@ -45,20 +60,14 @@ async fn main() {
     let mut observations = parse(&body);
     observations.reverse();
     for observation in observations {
-        let from_state = fsm.state();
-        let to_state = fsm.step(&observation);
+        let (from_state, to_state) = (fsm.state(), fsm.step(&observation));
 
         let event_fired = match (from_state, to_state) {
             (WindState::Low, WindState::High) => true,
             (WindState::Candidate(..), WindState::High) => true,
             _ => false,
         };
-        println!(
-            "{time}   {wind:2.1}m/s  {direction:3}° {event_fired:>6}    {to_state:?}",
-            time = observation.time,
-            wind = observation.avg_speed,
-            direction = observation.direction
-        )
+        println!("{observation} {event_fired:>6}    {to_state:?}")
     }
 }
 
@@ -147,69 +156,64 @@ impl Sector {
     }
 }
 
-struct NotificationLoop;
+async fn run_notification_loop(opts: &Opts) {
+    let mut fsm = WindTracker {
+        state: WindState::Low,
+        avg_speed_threshold: opts.speed,
+        candidate_steps: 2,
+        cooldown_steps: 2,
+        wind_sector: Sector::EAST_90,
+    };
 
-impl NotificationLoop {
-    async fn run(&mut self) {
-        let mut fsm = WindTracker {
-            state: WindState::Low,
-            avg_speed_threshold: 1.0,
-            candidate_steps: 2,
-            cooldown_steps: 2,
-            wind_sector: Sector::EAST_90,
+    let mut last_time: Option<DateTime<FixedOffset>> = None;
+    loop {
+        let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
+        let mut observations = parse(&body);
+        observations.sort_by_key(|o| o.time);
+
+        let new_observations = match last_time {
+            Some(last_time) => observations
+                .into_iter()
+                .filter(|o| o.time > last_time)
+                .collect(),
+            // Take only last observation as input at the start of the system
+            None => observations.split_off(observations.len() - 1),
         };
 
-        let mut last_time: Option<DateTime<FixedOffset>> = None;
-        let url = "http://3volna.ru/anemometer/getwind?id=1";
-        loop {
-            let body = reqwest::get(url).await.unwrap().text().await.unwrap();
-            let mut observations = parse(&body);
-            observations.sort_by_key(|o| o.time);
+        if let Some(last_observation) = new_observations.last() {
+            last_time = Some(last_observation.time)
+        }
 
-            let new_observations = match last_time {
-                Some(last_time) => observations
-                    .into_iter()
-                    .filter(|o| o.time > last_time)
-                    .collect(),
-                // Take only last observation as input at the start of the system
-                None => observations.split_off(observations.len() - 1),
+        let mut fired_observation = None;
+
+        for obs in new_observations {
+            trace!("Processing new observation: {}", obs);
+
+            let event_fired = match (fsm.state(), fsm.step(&obs)) {
+                (WindState::Low, WindState::High) => true,
+                (WindState::Candidate(..), WindState::High) => true,
+                _ => false,
             };
 
-            if let Some(last_observation) = new_observations.last() {
-                last_time = Some(last_observation.time)
+            if event_fired {
+                fired_observation = fired_observation.or(Some(obs));
             }
-
-            let mut fired_observation = None;
-
-            for obs in new_observations {
-                trace!("Processing new observation: {}", obs);
-
-                let event_fired = match (fsm.state(), fsm.step(&obs)) {
-                    (WindState::Low, WindState::High) => true,
-                    (WindState::Candidate(..), WindState::High) => true,
-                    _ => false,
-                };
-
-                if event_fired {
-                    fired_observation = fired_observation.or(Some(obs));
-                }
-            }
-
-            if let Some(observation) = fired_observation {
-                self.notify(&observation);
-            }
-
-            sleep(Duration::from_secs(10)).await;
         }
-    }
 
-    fn notify(&self, observation: &Observation) {
-        warn!(
-            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
-            speed = observation.avg_speed,
-            direction = observation.direction
-        );
+        if let Some(observation) = fired_observation {
+            notify(&observation);
+        }
+
+        sleep(Duration::from_secs(10)).await;
     }
+}
+
+fn notify(observation: &Observation) {
+    warn!(
+        "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
+        speed = observation.avg_speed,
+        direction = observation.direction
+    );
 }
 
 #[cfg(test)]
