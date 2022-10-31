@@ -1,5 +1,10 @@
+use std::time::Duration;
+
+use chrono::{DateTime, FixedOffset};
 use clap::Parser;
+use log::{trace, warn};
 use parser::{parse, Observation};
+use tokio::time::{sleep, sleep_until};
 
 mod parser;
 
@@ -15,7 +20,17 @@ struct Opts {
 }
 
 #[tokio::main]
+async fn main2() {
+    env_logger::init();
+
+    let mut luup = NotificationLoop;
+    luup.run().await
+}
+
+#[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let opts = Opts::parse();
     let body = reqwest::get(opts.url).await.unwrap().text().await.unwrap();
 
@@ -121,6 +136,71 @@ impl Sector {
         } else {
             self.0 <= angle || angle <= self.1
         }
+    }
+}
+
+struct NotificationLoop;
+
+impl NotificationLoop {
+    async fn run(&mut self) {
+        let mut fsm = TrackingFsm {
+            state: State::Low,
+            avg_speed_threshold: 1.0,
+            candidate_steps: 2,
+            cooldown_steps: 2,
+            wind_sector: Sector::EAST_90,
+        };
+
+        let mut last_time: Option<DateTime<FixedOffset>> = None;
+        let url = "http://3volna.ru/anemometer/getwind?id=1";
+        loop {
+            let body = reqwest::get(url).await.unwrap().text().await.unwrap();
+            let mut observations = parse(&body);
+            observations.sort_by_key(|o| o.time);
+
+            let new_observations = match last_time {
+                Some(last_time) => observations
+                    .into_iter()
+                    .filter(|o| o.time > last_time)
+                    .collect(),
+                // Take only last observation as input at the start of the system
+                None => observations.split_off(observations.len() - 1),
+            };
+
+            if let Some(last_observation) = new_observations.last() {
+                last_time = Some(last_observation.time)
+            }
+
+            let mut fired_observation = None;
+
+            for obs in new_observations {
+                trace!("Processing new observation: {}", obs);
+
+                let event_fired = match (fsm.state(), fsm.step(&obs)) {
+                    (State::Low, State::High) => true,
+                    (State::Candidate(..), State::High) => true,
+                    _ => false,
+                };
+
+                if event_fired {
+                    fired_observation = fired_observation.or(Some(obs));
+                }
+            }
+
+            if let Some(observation) = fired_observation {
+                self.notify(&observation);
+            }
+
+            sleep(Duration::from_secs(10)).await;
+        }
+    }
+
+    fn notify(&self, observation: &Observation) {
+        warn!(
+            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
+            speed = observation.avg_speed,
+            direction = observation.direction
+        );
     }
 }
 
