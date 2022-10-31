@@ -9,7 +9,9 @@ edition = "2021"
 chrono = { version = "0.4.22", features = ["serde"] }
 chrono-tz = "0.7.0"
 clap = { version = "4.0.18", features = ["derive"] }
+env_logger = "0.9.1"
 lazy_static = "1.4.0"
+log = "0.4.17"
 regex = "1.6.0"
 reqwest = "0.11.12"
 select = "0.5.0"
