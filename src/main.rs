@@ -21,6 +21,9 @@ use tokio::time::sleep;
 
 mod parser;
 
+type Shared<T> = Arc<Mutex<T>>;
+type Users = HashSet<ChatId>;
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -43,8 +46,8 @@ struct Opts {
 enum Action {
     /// parse remote url
     Parse(Opts),
-    /// running notification loop
-    Run(Opts),
+    /// running telegram bot
+    RunTelegramBot(Opts),
 }
 
 #[tokio::main]
@@ -56,7 +59,7 @@ async fn main() {
 
     match args.action {
         Action::Parse(opts) => run_parse(&opts).await,
-        Action::Run(opts) => run_notification_loop(opts).await,
+        Action::RunTelegramBot(opts) => tg::run_bot(opts).await,
     }
 }
 
@@ -151,14 +154,17 @@ impl WindTracker {
 struct Sector(u16, u16);
 
 impl Sector {
-    const NORTH_90: Sector = Sector(315, 45);
-    const EAST_90: Sector = Sector(45, 135);
-    const SOUTH_90: Sector = Sector(135, 225);
-    const WEST_90: Sector = Sector(225, 315);
-
-    fn new(angle_from: u16, angle_to: u16) -> Self {
-        Self(angle_from, angle_to)
-    }
+    #[allow(dead_code)]
+    pub const NORTH_90: Sector = Sector(315, 45);
+    
+    #[allow(dead_code)]
+    pub const EAST_90: Sector = Sector(45, 135);
+    
+    #[allow(dead_code)]
+    pub const SOUTH_90: Sector = Sector(135, 225);
+    
+    #[allow(dead_code)]
+    pub const WEST_90: Sector = Sector(225, 315);
 
     fn test(&self, angle: u16) -> bool {
         let angle = angle % 360;
@@ -170,7 +176,7 @@ impl Sector {
     }
 }
 
-async fn parse_loop(opts: Opts, bot: Bot, users: Shared<Users>) {
+async fn parse_loop(opts: Opts, bot: Arc<Bot>, users: Shared<Users>) {
     let mut fsm = WindTracker {
         state: WindState::Low,
         avg_speed_threshold: opts.speed,
@@ -201,7 +207,7 @@ async fn parse_loop(opts: Opts, bot: Bot, users: Shared<Users>) {
         let mut fired_observation = None;
 
         for obs in new_observations {
-            trace!("Processing new observation: {}", obs);
+            trace!("Processing observation: {}", obs);
 
             let event_fired = match (fsm.state(), fsm.step(&obs)) {
                 (WindState::Low, WindState::High) => true,
@@ -209,79 +215,81 @@ async fn parse_loop(opts: Opts, bot: Bot, users: Shared<Users>) {
                 _ => false,
             };
 
-            if event_fired || true {
+            if event_fired {
                 fired_observation = fired_observation.or(Some(obs));
             }
         }
 
         if let Some(observation) = fired_observation {
             let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
-            notify(&observation, &bot, &users[..]).await;
+            tg::notify(&observation, &bot, &users[..]).await;
         }
 
         sleep(Duration::from_secs(10)).await;
     }
 }
 
-type Shared<T> = Arc<Mutex<T>>;
-type Users = HashSet<ChatId>;
+mod tg {
+    use super::*;
 
-async fn subscribe_handler(
-    bot: Bot,
-    msg: Message,
-    users: Shared<Users>,
-) -> Result<(), RequestError> {
-    debug!("{:?}", &msg);
-    if let ChatKind::Private { .. } = msg.chat.kind {
-        let chat_id = msg.chat.id;
-        if let MessageKind::Common(msg) = msg.kind {
-            if let MediaKind::Text(_) = msg.media_kind {
-                debug!("Subscribing {:?}", chat_id);
-                users.lock().unwrap().insert(chat_id);
-                bot.send_message(chat_id, "You are subscribed sucessfully!")
-                    .await?;
-            }
-        }
+    pub(crate) async fn run_bot(opts: Opts) {
+        let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
+        let bot = Arc::new(Bot::new(token));
+        let users = Arc::new(Mutex::new(HashSet::new()));
+
+        let subscription_loop_handle = tokio::spawn(subscription_loop(bot.clone(), users.clone()));
+        let parse_loop_handle = tokio::spawn(parse_loop(opts, bot, users));
+
+        parse_loop_handle.await.unwrap();
+        subscription_loop_handle.await.unwrap();
     }
 
-    Ok(())
-}
+    async fn subscription_loop(bot: Arc<Bot>, users: Shared<Users>) {
+        let handler =
+            dptree::entry().branch(Update::filter_message().endpoint(subscription_handler));
+        Dispatcher::builder(bot, handler)
+            .dependencies(deps![users])
+            .build()
+            .dispatch()
+            .await;
+    }
 
-async fn telegram_subscription_loop(bot: Bot, users: Shared<Users>) {
-    let handler = dptree::entry().branch(Update::filter_message().endpoint(subscribe_handler));
-    Dispatcher::builder(bot, handler)
-        .dependencies(deps![users])
-        .build()
-        .dispatch()
-        .await;
-}
+    async fn subscription_handler(
+        bot: Bot,
+        msg: Message,
+        users: Shared<Users>,
+    ) -> Result<(), RequestError> {
+        debug!("{:?}", &msg);
+        if let ChatKind::Private { .. } = msg.chat.kind {
+            let chat_id = msg.chat.id;
+            if let MessageKind::Common(msg) = msg.kind {
+                if let MediaKind::Text(_) = msg.media_kind {
+                    debug!("Subscribing {:?}", chat_id);
+                    users.lock().unwrap().insert(chat_id);
+                    bot.send_message(chat_id, "You are subscribed sucessfully!")
+                        .await?;
+                }
+            }
+        }
 
-async fn run_notification_loop(opts: Opts) {
-    let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
-    let bot = Bot::new(token);
-    let users = Arc::new(Mutex::new(HashSet::new()));
+        Ok(())
+    }
 
-    let telegram_loop_handle = tokio::spawn(telegram_subscription_loop(bot.clone(), users.clone()));
-    let parse_loop_handle = tokio::spawn(parse_loop(opts.clone(), bot, users));
+    pub(crate) async fn notify(observation: &Observation, bot: &Bot, users: &[ChatId]) {
+        warn!(
+            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
+            speed = observation.avg_speed,
+            direction = observation.direction
+        );
 
-    parse_loop_handle.await.unwrap();
-    telegram_loop_handle.await.unwrap();
-}
-
-async fn notify(observation: &Observation, bot: &Bot, users: &[ChatId]) {
-    warn!(
-        "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
-        speed = observation.avg_speed,
-        direction = observation.direction
-    );
-
-    let message = format!(
-        "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
-        speed = observation.avg_speed,
-        direction = observation.direction
-    );
-    for chat in users.iter() {
-        bot.send_message(*chat, &message).await.unwrap();
+        let message = format!(
+            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
+            speed = observation.avg_speed,
+            direction = observation.direction
+        );
+        for chat in users.iter() {
+            bot.send_message(*chat, &message).await.unwrap();
+        }
     }
 }
 
@@ -365,7 +373,7 @@ mod test {
 
     #[test]
     fn sector() {
-        let sector = Sector::new(0, 45);
+        let sector = Sector(0, 45);
 
         assert_eq!(true, sector.test(0));
         assert_eq!(true, sector.test(30));
@@ -374,7 +382,7 @@ mod test {
         assert_eq!(false, sector.test(46));
         assert_eq!(false, sector.test(359));
 
-        let sector = Sector::new(280, 90);
+        let sector = Sector(280, 90);
 
         assert_eq!(true, sector.test(290));
         assert_eq!(true, sector.test(0));
