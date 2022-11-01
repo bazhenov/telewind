@@ -1,9 +1,22 @@
-use std::time::Duration;
-
 use chrono::{DateTime, FixedOffset};
 use clap::{Parser, Subcommand};
-use log::{trace, warn};
+use dotenv::dotenv;
+use log::{debug, trace, warn};
 use parser::{parse, Observation};
+use std::{
+    collections::HashSet,
+    env,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use teloxide::{
+    dispatching::UpdateFilterExt,
+    dptree::{self, deps},
+    prelude::Dispatcher,
+    requests::Requester,
+    types::{ChatId, ChatKind, MediaKind, Message, MessageKind, Update},
+    Bot, RequestError,
+};
 use tokio::time::sleep;
 
 mod parser;
@@ -14,7 +27,7 @@ struct Args {
     action: Action,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct Opts {
     /// source url to download
@@ -37,12 +50,13 @@ enum Action {
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    dotenv().ok();
 
     let args = Args::parse();
 
     match args.action {
         Action::Parse(opts) => run_parse(&opts).await,
-        Action::Run(opts) => run_notification_loop(&opts).await,
+        Action::Run(opts) => run_notification_loop(opts).await,
     }
 }
 
@@ -156,7 +170,7 @@ impl Sector {
     }
 }
 
-async fn run_notification_loop(opts: &Opts) {
+async fn parse_loop(opts: Opts, bot: Bot, users: Shared<Users>) {
     let mut fsm = WindTracker {
         state: WindState::Low,
         avg_speed_threshold: opts.speed,
@@ -195,25 +209,80 @@ async fn run_notification_loop(opts: &Opts) {
                 _ => false,
             };
 
-            if event_fired {
+            if event_fired || true {
                 fired_observation = fired_observation.or(Some(obs));
             }
         }
 
         if let Some(observation) = fired_observation {
-            notify(&observation);
+            let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+            notify(&observation, &bot, &users[..]).await;
         }
 
         sleep(Duration::from_secs(10)).await;
     }
 }
 
-fn notify(observation: &Observation) {
+type Shared<T> = Arc<Mutex<T>>;
+type Users = HashSet<ChatId>;
+
+async fn subscribe_handler(
+    bot: Bot,
+    msg: Message,
+    users: Shared<Users>,
+) -> Result<(), RequestError> {
+    debug!("{:?}", &msg);
+    if let ChatKind::Private { .. } = msg.chat.kind {
+        let chat_id = msg.chat.id;
+        if let MessageKind::Common(msg) = msg.kind {
+            if let MediaKind::Text(_) = msg.media_kind {
+                debug!("Subscribing {:?}", chat_id);
+                users.lock().unwrap().insert(chat_id);
+                bot.send_message(chat_id, "You are subscribed sucessfully!")
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn telegram_subscription_loop(bot: Bot, users: Shared<Users>) {
+    let handler = dptree::entry().branch(Update::filter_message().endpoint(subscribe_handler));
+    Dispatcher::builder(bot, handler)
+        .dependencies(deps![users])
+        .build()
+        .dispatch()
+        .await;
+}
+
+async fn run_notification_loop(opts: Opts) {
+    let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
+    let bot = Bot::new(token);
+    let users = Arc::new(Mutex::new(HashSet::new()));
+
+    let telegram_loop_handle = tokio::spawn(telegram_subscription_loop(bot.clone(), users.clone()));
+    let parse_loop_handle = tokio::spawn(parse_loop(opts.clone(), bot, users));
+
+    parse_loop_handle.await.unwrap();
+    telegram_loop_handle.await.unwrap();
+}
+
+async fn notify(observation: &Observation, bot: &Bot, users: &[ChatId]) {
     warn!(
         "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
         speed = observation.avg_speed,
         direction = observation.direction
     );
+
+    let message = format!(
+        "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
+        speed = observation.avg_speed,
+        direction = observation.direction
+    );
+    for chat in users.iter() {
+        bot.send_message(*chat, &message).await.unwrap();
+    }
 }
 
 #[cfg(test)]
