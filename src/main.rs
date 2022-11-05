@@ -188,72 +188,77 @@ impl Sector {
     }
 }
 
-async fn parse_loop(opts: Opts, bot: Arc<Bot>, users: Shared<Users>) {
-    let mut fsm = WindTracker {
-        state: WindState::Low,
-        avg_speed_threshold: opts.speed,
-        candidate_steps: 2,
-        cooldown_steps: 2,
-        wind_sector: Sector::EAST_90,
-    };
-
-    let mut last_time: Option<DateTime<FixedOffset>> = None;
-    loop {
-        let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
-        let mut observations = parse(&body);
-        observations.sort_by_key(|o| o.time);
-
-        let new_observations = match last_time {
-            Some(last_time) => observations
-                .into_iter()
-                .filter(|o| o.time > last_time)
-                .collect(),
-            // Take only last observation as input at the start of the system
-            None => observations.split_off(observations.len() - 1),
-        };
-
-        if let Some(last_observation) = new_observations.last() {
-            last_time = Some(last_observation.time)
-        }
-
-        let mut fired_observation = None;
-
-        for obs in new_observations {
-            trace!("Processing observation: {}", obs);
-
-            let event_fired = match (fsm.state(), fsm.step(&obs)) {
-                (WindState::Low, WindState::High) => true,
-                (WindState::Candidate(..), WindState::High) => true,
-                _ => false,
-            };
-
-            if event_fired {
-                fired_observation = fired_observation.or(Some(obs));
-            }
-        }
-
-        if let Some(observation) = fired_observation {
-            let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
-            tg::notify(&observation, &bot, &users[..]).await;
-        }
-
-        sleep(Duration::from_secs(10)).await;
-    }
-}
-
 mod tg {
     use super::*;
 
     pub(crate) async fn run_bot(opts: Opts) {
         let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
         let bot = Arc::new(Bot::new(token));
-        let users = Arc::new(Mutex::new(HashSet::new()));
+        let mut users = HashSet::new();
+        users.insert(ChatId(230741741));
+        let users = Arc::new(Mutex::new(users));
 
         let subscription_loop_handle = tokio::spawn(subscription_loop(bot.clone(), users.clone()));
-        let parse_loop_handle = tokio::spawn(parse_loop(opts, bot, users));
+        let parse_loop_handle = tokio::spawn(parse_and_notify_loop(opts, bot, users));
 
         parse_loop_handle.await.unwrap();
         subscription_loop_handle.await.unwrap();
+    }
+
+    async fn parse_and_notify_loop(opts: Opts, bot: Arc<Bot>, users: Shared<Users>) {
+        let mut fsm = WindTracker {
+            state: WindState::Low,
+            avg_speed_threshold: opts.speed,
+            candidate_steps: 2,
+            cooldown_steps: 2,
+            wind_sector: Sector::NORTH_180,
+        };
+
+        let mut last_time: Option<DateTime<FixedOffset>> = None;
+        loop {
+            let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
+            let mut observations = parse(&body);
+            observations.sort_by_key(|o| o.time);
+
+            let new_observations = match last_time {
+                Some(last_time) => observations
+                    .into_iter()
+                    .filter(|o| o.time > last_time)
+                    .collect(),
+                // Take only last observation as input at the start of the system
+                None => observations.split_off(observations.len() - 1),
+            };
+
+            if let Some(last_observation) = new_observations.last() {
+                last_time = Some(last_observation.time)
+            }
+
+            let mut fired_observation = None;
+
+            for obs in new_observations {
+                let before_state = fsm.state();
+                let after_state = fsm.step(&obs);
+
+                trace!("Processing observation: {} ({:?})", obs, after_state);
+
+                let event_fired = match (before_state, after_state) {
+                    (WindState::Low, WindState::High) => true,
+                    (WindState::Candidate(..), WindState::High) => true,
+                    _ => false,
+                };
+
+                if event_fired {
+                    fired_observation = fired_observation.or(Some(obs));
+                }
+            }
+
+            if let Some(observation) = fired_observation {
+                let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+                tg::notify(&observation, &bot, &users[..]).await;
+            }
+
+            sleep(Duration::from_secs(45)).await;
+        }
     }
 
     async fn subscription_loop(bot: Arc<Bot>, users: Shared<Users>) {
@@ -267,7 +272,7 @@ mod tg {
     }
 
     async fn subscription_handler(
-        bot: Bot,
+        bot: Arc<Bot>,
         msg: Message,
         users: Shared<Users>,
     ) -> Result<(), RequestError> {
@@ -289,16 +294,11 @@ mod tg {
 
     pub(crate) async fn notify(observation: &Observation, bot: &Bot, users: &[ChatId]) {
         warn!(
-            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
-            speed = observation.avg_speed,
-            direction = observation.direction
+            "Wind is growing up: {observation}. Sending notifications to {} users",
+            users.len()
         );
 
-        let message = format!(
-            "Wind is growing up: {speed:2.1} m/s, {direction:3}°",
-            speed = observation.avg_speed,
-            direction = observation.direction
-        );
+        let message = format!("Wind is growing up: {observation}");
         for chat in users.iter() {
             bot.send_message(*chat, &message).await.unwrap();
         }
