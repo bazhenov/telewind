@@ -22,13 +22,31 @@ pub struct Observation {
     pub avg_speed: f32,
 }
 
+const DIRECTIONS: [(u16, &str, &str); 9] = [
+    (0, "N", "↓"),
+    (360, "N", "↓"),
+    (45, "NE", "↙"),
+    (90, "E", "←"),
+    (135, "SE", "↖"),
+    (180, "S", "↑"),
+    (225, "SW", "↗"),
+    (270, "W", "→"),
+    (315, "NW", "↘"),
+];
+
 impl Display for Observation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (_, direction_str, direction_marker) = DIRECTIONS
+            .iter()
+            .min_by_key(|d| self.direction.abs_diff(d.0))
+            .unwrap();
         write!(
             f,
-            "{} {:2.1} m/s {:3}°",
+            "{} {:2.1} m/s {:2} {} ({:3}°)",
             self.time.format("%H:%M"),
             self.avg_speed,
+            direction_str,
+            direction_marker,
             self.direction
         )
     }
