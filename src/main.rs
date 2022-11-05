@@ -147,7 +147,7 @@ impl WindTracker {
 
 /// Circle sector
 ///
-/// Can test if given angle (0-350 deg.) is in circle sector.
+/// Can test if given angle (0-359 deg.) is in circle sector.
 /// Sector is defined as two angles (from angle and to angle). Two angles
 /// always given in clockwise order, so `Sector::new(270, 90)` is upper half circle and
 /// `Sector::new(90, 270)` is lower.
