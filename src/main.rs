@@ -155,14 +155,26 @@ struct Sector(u16, u16);
 
 impl Sector {
     #[allow(dead_code)]
+    pub const NORTH_180: Sector = Sector(270, 90);
+
+    #[allow(dead_code)]
+    pub const SOUTH_180: Sector = Sector(90, 270);
+
+    #[allow(dead_code)]
+    pub const EAST_180: Sector = Sector(0, 180);
+
+    #[allow(dead_code)]
+    pub const WEST_180: Sector = Sector(180, 0);
+
+    #[allow(dead_code)]
     pub const NORTH_90: Sector = Sector(315, 45);
-    
+
     #[allow(dead_code)]
     pub const EAST_90: Sector = Sector(45, 135);
-    
+
     #[allow(dead_code)]
     pub const SOUTH_90: Sector = Sector(135, 225);
-    
+
     #[allow(dead_code)]
     pub const WEST_90: Sector = Sector(225, 315);
 
