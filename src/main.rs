@@ -1,9 +1,11 @@
 use chrono::{DateTime, FixedOffset};
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
+use futures::{stream, Stream, StreamExt};
 use log::{debug, trace, warn};
 use parser::{parse, Observation};
 use std::{
+    cmp::Reverse,
     collections::HashSet,
     env,
     sync::{Arc, Mutex},
@@ -17,7 +19,7 @@ use teloxide::{
     types::{ChatId, ChatKind, MediaKind, Message, MessageKind, Update},
     Bot, RequestError,
 };
-use tokio::time::sleep;
+use tokio::time::{self, Interval, MissedTickBehavior};
 
 mod parser;
 
@@ -77,14 +79,9 @@ async fn run_parse(opts: &Opts) {
     let mut observations = parse(&body);
     observations.reverse();
     for observation in observations {
-        let (from_state, to_state) = (fsm.state(), fsm.step(&observation));
-
-        let event_fired = match (from_state, to_state) {
-            (WindState::Low, WindState::High) => true,
-            (WindState::Candidate(..), WindState::High) => true,
-            _ => false,
-        };
-        println!("{observation} {event_fired:>6}    {to_state:?}")
+        let event_fired = fsm.step(&observation);
+        let after_state = fsm.state();
+        println!("{observation} {event_fired:>6}    {after_state:?}")
     }
 }
 
@@ -113,9 +110,11 @@ struct WindTracker {
 }
 
 impl WindTracker {
-    fn step(&mut self, observation: &Observation) -> WindState {
+    /// Returns true if target event is found (FSM reach [`WindState::High`] state)
+    fn step(&mut self, observation: &Observation) -> bool {
         use WindState::*;
 
+        let before_state = self.state;
         let direction_match = self.wind_sector.test(observation.direction);
         let speed_match = observation.avg_speed >= self.avg_speed_threshold;
         self.state = if speed_match && direction_match {
@@ -137,7 +136,11 @@ impl WindTracker {
                 Cooldown(i) => Cooldown(i + 1),
             }
         };
-        self.state
+        match (before_state, self.state) {
+            (Low, High) => true,
+            (Candidate(_), High) => true,
+            _ => false,
+        }
     }
 
     fn state(&self) -> WindState {
@@ -188,6 +191,57 @@ impl Sector {
     }
 }
 
+/// Stream of new observations realtime
+///
+/// Parse remote URL with given interval and return new observations one by one
+fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Observation> {
+    struct State {
+        url: String,
+        interval: Interval,
+        // parsed but not yet processed observations in reverse order ()
+        observations: Vec<Observation>,
+        last_parse_time: Option<DateTime<FixedOffset>>,
+    }
+
+    let state = State {
+        url: url.to_owned(),
+        interval,
+        observations: vec![],
+        last_parse_time: None,
+    };
+
+    stream::unfold(state, |mut state| async {
+        loop {
+            // If we have already collected observations return them one by one
+            if let Some(observation) = state.observations.pop() {
+                return Some((observation, state));
+            }
+
+            state.interval.tick().await;
+            let body = reqwest::get(&state.url)
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            let mut new_observations = parse(&body);
+            if new_observations.is_empty() {
+                continue;
+            }
+            new_observations.sort_by_key(|o| Reverse(o.time));
+
+            state.observations = match state.last_parse_time {
+                Some(time) => new_observations
+                    .into_iter()
+                    .filter(|o| o.time > time)
+                    .collect(),
+                // Take most recent observation at the start of the system
+                None => vec![new_observations.swap_remove(0)],
+            };
+        }
+    })
+}
+
 mod tg {
     use super::*;
 
@@ -209,55 +263,23 @@ mod tg {
         let mut fsm = WindTracker {
             state: WindState::Low,
             avg_speed_threshold: opts.speed,
-            candidate_steps: 2,
-            cooldown_steps: 2,
+            candidate_steps: 5,
+            cooldown_steps: 5,
             wind_sector: Sector::NORTH_180,
         };
+        let mut interval = time::interval(Duration::from_secs(45));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let mut last_time: Option<DateTime<FixedOffset>> = None;
-        loop {
-            let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
-            let mut observations = parse(&body);
-            observations.sort_by_key(|o| o.time);
+        let mut observations = Box::pin(observation_stream(&opts.url, interval));
+        while let Some(obs) = observations.next().await {
+            let event_fired = fsm.step(&obs);
+            let after_state = fsm.state();
+            trace!("Processing observation: {} ({:?})", obs, after_state);
 
-            let new_observations = match last_time {
-                Some(last_time) => observations
-                    .into_iter()
-                    .filter(|o| o.time > last_time)
-                    .collect(),
-                // Take only last observation as input at the start of the system
-                None => observations.split_off(observations.len() - 1),
-            };
-
-            if let Some(last_observation) = new_observations.last() {
-                last_time = Some(last_observation.time)
-            }
-
-            let mut fired_observation = None;
-
-            for obs in new_observations {
-                let before_state = fsm.state();
-                let after_state = fsm.step(&obs);
-
-                trace!("Processing observation: {} ({:?})", obs, after_state);
-
-                let event_fired = match (before_state, after_state) {
-                    (WindState::Low, WindState::High) => true,
-                    (WindState::Candidate(..), WindState::High) => true,
-                    _ => false,
-                };
-
-                if event_fired {
-                    fired_observation = fired_observation.or(Some(obs));
-                }
-            }
-
-            if let Some(observation) = fired_observation {
+            if event_fired {
                 let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
-                tg::notify(&observation, &bot, &users[..]).await;
+                tg::notify(&obs, &bot, &users[..]).await;
             }
-
-            sleep(Duration::from_secs(45)).await;
         }
     }
 
@@ -327,6 +349,11 @@ mod test {
         }
     }
 
+    fn step(fsm: &mut WindTracker, observation: &Observation) -> WindState {
+        fsm.step(&observation);
+        fsm.state()
+    }
+
     fn new_seq_and_fsm(
         candidate_steps: u8,
         cooldown_steps: u8,
@@ -349,38 +376,38 @@ mod test {
     fn fsm_full_cycle() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(3.2, 180)), WindState::Low);
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::Candidate(2));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::High);
-        assert_eq!(fsm.step(&seq.next(3.5, 180)), WindState::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(3.5, 180)), WindState::Cooldown(2));
-        assert_eq!(fsm.step(&seq.next(4.1, 180)), WindState::Low);
+        assert_eq!(step(&mut fsm, &seq.next(3.2, 180)), WindState::Low);
+        assert_eq!(step(&mut fsm, &seq.next(5.7, 180)), WindState::Candidate(1));
+        assert_eq!(step(&mut fsm, &seq.next(5.4, 180)), WindState::Candidate(2));
+        assert_eq!(step(&mut fsm, &seq.next(5.4, 180)), WindState::High);
+        assert_eq!(step(&mut fsm, &seq.next(3.5, 180)), WindState::Cooldown(1));
+        assert_eq!(step(&mut fsm, &seq.next(3.5, 180)), WindState::Cooldown(2));
+        assert_eq!(step(&mut fsm, &seq.next(4.1, 180)), WindState::Low);
     }
 
     #[test]
     fn fsm_directorion_mismatch() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.0, 180)), WindState::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(5.0, 0)), WindState::Low);
+        assert_eq!(step(&mut fsm, &seq.next(5.0, 180)), WindState::Candidate(1));
+        assert_eq!(step(&mut fsm, &seq.next(5.0, 0)), WindState::Low);
     }
 
     #[test]
     fn fsm_candidate_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(2, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::Candidate(1));
-        assert_eq!(fsm.step(&seq.next(3.4, 180)), WindState::Low);
+        assert_eq!(step(&mut fsm, &seq.next(5.7, 180)), WindState::Candidate(1));
+        assert_eq!(step(&mut fsm, &seq.next(3.4, 180)), WindState::Low);
     }
 
     #[test]
     fn fsm_cooldown_reset() {
         let (mut seq, mut fsm) = new_seq_and_fsm(0, 2);
 
-        assert_eq!(fsm.step(&seq.next(5.7, 180)), WindState::High);
-        assert_eq!(fsm.step(&seq.next(3.7, 180)), WindState::Cooldown(1));
-        assert_eq!(fsm.step(&seq.next(5.4, 180)), WindState::High);
+        assert_eq!(step(&mut fsm, &seq.next(5.7, 180)), WindState::High);
+        assert_eq!(step(&mut fsm, &seq.next(3.7, 180)), WindState::Cooldown(1));
+        assert_eq!(step(&mut fsm, &seq.next(5.4, 180)), WindState::High);
     }
 
     #[test]

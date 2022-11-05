@@ -59,7 +59,7 @@ pub fn parse(input: &str) -> Vec<Observation> {
     let mut result = vec![];
 
     for row in rows {
-        if let Some(_) = row.find(Name("th")).next() {
+        if row.find(Name("th")).next().is_some() {
             // skippping header
             continue;
         }
