@@ -1625,6 +1625,7 @@ dependencies = [
  "clap",
  "dotenv",
  "env_logger",
+ "futures",
  "insta",
  "lazy_static",
  "log",
