@@ -136,11 +136,10 @@ impl WindTracker {
                 Cooldown(i) => Cooldown(i + 1),
             }
         };
-        match (before_state, self.state) {
-            (Low, High) => true,
-            (Candidate(_), High) => true,
-            _ => false,
-        }
+        matches!(
+            (before_state, self.state),
+            (Low, High) | (Candidate(_), High)
+        )
     }
 
     fn state(&self) -> WindState {
@@ -203,16 +202,8 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Obser
         last_parse_time: Option<DateTime<FixedOffset>>,
     }
 
-    let state = State {
-        url: url.to_owned(),
-        interval,
-        observations: vec![],
-        last_parse_time: None,
-    };
-
-    stream::unfold(state, |mut state| async {
+    async fn next_observation(mut state: State) -> Option<(Observation, State)> {
         loop {
-            // If we have already collected observations return them one by one
             if let Some(observation) = state.observations.pop() {
                 return Some((observation, state));
             }
@@ -224,28 +215,36 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Obser
                 .text()
                 .await
                 .unwrap();
-            let mut new_observations = parse(&body);
-            if new_observations.is_empty() {
-                continue;
-            }
-            new_observations.sort_by_key(|o| Reverse(o.time));
+            let mut last_observations = parse(&body);
+            if !last_observations.is_empty() {
+                last_observations.sort_by_key(|o| Reverse(o.time));
 
-            state.observations = match state.last_parse_time {
-                Some(time) => new_observations
-                    .into_iter()
-                    .filter(|o| o.time > time)
-                    .collect(),
-                // Take most recent observation at the start of the system
-                None => vec![new_observations.swap_remove(0)],
-            };
-            state.last_parse_time = state
-                .observations
-                .iter()
-                .map(|o| o.time)
-                .max()
-                .or(state.last_parse_time);
+                state.observations = match state.last_parse_time {
+                    Some(time) => last_observations
+                        .into_iter()
+                        .filter(|o| o.time > time)
+                        .collect(),
+                    // Take most recent observation at the start of the system
+                    None => vec![last_observations.swap_remove(0)],
+                };
+                state.last_parse_time = state
+                    .observations
+                    .iter()
+                    .map(|o| o.time)
+                    .max()
+                    .or(state.last_parse_time);
+            }
         }
-    })
+    }
+
+    let state = State {
+        url: url.to_owned(),
+        interval,
+        observations: vec![],
+        last_parse_time: None,
+    };
+
+    stream::unfold(state, next_observation)
 }
 
 mod tg {
