@@ -9,6 +9,7 @@ edition = "2021"
 chrono = { version = "0.4.22", features = ["serde"] }
 chrono-tz = "0.7.0"
 clap = { version = "4.0.18", features = ["derive"] }
+console-subscriber = "0.1.8"
 dotenv = "0.15.0"
 env_logger = "0.9.1"
 futures = "0.3.25"
@@ -19,7 +20,7 @@ reqwest = "0.11.12"
 select = "0.5.0"
 serde = { version = "1.0.147", features = ["derive"] }
 teloxide = "0.11.1"
-tokio = { version = "1.21.2", features = ["rt", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.21.2", features = ["rt", "macros", "rt-multi-thread", "time", "tracing"] }
 
 [dev-dependencies]
 insta = { version = "1.21.0", features = ["yaml"] }

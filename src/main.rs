@@ -56,6 +56,10 @@ enum Action {
 async fn main() {
     dotenv().ok();
     env_logger::init();
+    if dotenv::var("TOKIO_CONSOLE_SUBSCRIBER").ok().is_some() {
+        debug!("Initializaing tokio.rs console subscriber");
+        console_subscriber::init();
+    }
 
     let args = Args::parse();
 
@@ -257,8 +261,14 @@ mod tg {
         users.insert(ChatId(230741741));
         let users = Arc::new(Mutex::new(users));
 
-        let subscription_loop_handle = tokio::spawn(subscription_loop(bot.clone(), users.clone()));
-        let parse_loop_handle = tokio::spawn(parse_and_notify_loop(opts, bot, users));
+        let subscription_loop_handle = tokio::task::Builder::new()
+            .name("subscription loop")
+            .spawn(subscription_loop(bot.clone(), users.clone()))
+            .unwrap();
+        let parse_loop_handle = tokio::task::Builder::new()
+            .name("parse and notify loop")
+            .spawn(parse_and_notify_loop(opts, bot, users))
+            .unwrap();
 
         parse_loop_handle.await.unwrap();
         subscription_loop_handle.await.unwrap();
