@@ -54,8 +54,8 @@ enum Action {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
     dotenv().ok();
+    env_logger::init();
 
     let args = Args::parse();
 
