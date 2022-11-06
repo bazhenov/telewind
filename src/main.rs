@@ -238,6 +238,12 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Obser
                 // Take most recent observation at the start of the system
                 None => vec![new_observations.swap_remove(0)],
             };
+            state.last_parse_time = state
+                .observations
+                .iter()
+                .map(|o| o.time)
+                .max()
+                .or(state.last_parse_time);
         }
     })
 }
@@ -267,7 +273,7 @@ mod tg {
             cooldown_steps: 5,
             wind_sector: Sector::NORTH_180,
         };
-        let mut interval = time::interval(Duration::from_secs(45));
+        let mut interval = time::interval(Duration::from_secs(55));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let mut observations = Box::pin(observation_stream(&opts.url, interval));
