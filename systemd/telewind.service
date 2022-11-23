@@ -1,0 +1,13 @@
+[Unit]
+Description=Telewind service
+BindsTo=docker
+After=docker
+
+[Service]
+EnvironmentFile=/root/.env
+ExecStartPre=docker pull ghcr.io/bazhenov/telewind:${IMAGE_TAG}
+ExecStart=docker run --name telewind --rm -i --env-file=/root/.env ghcr.io/bazhenov/telewind:${IMAGE_TAG} run-telegram-bot
+ExecStop=docker stop telewind
+
+[Install]
+WantedBy=multi-user.target
