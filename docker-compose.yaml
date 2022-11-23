@@ -1,0 +1,29 @@
+version: '3'
+services:
+  cargo:
+    image: rust:1.65
+    working_dir: /opt
+    entrypoint: cargo
+    volumes:
+      - cargo:/usr/local/cargo
+      - target:/opt/target
+      - type: bind
+        source: ./src
+        target: /opt/src
+      - type: bind
+        source: ./Cargo.toml
+        target: /opt/Cargo.toml
+      - type: bind
+        source: ./Cargo.lock
+        target: /opt/Cargo.lock
+      - type: bind
+        source: ./.cargo
+        target: /opt/.cargo
+  dummy:
+    image: alpine
+    entrypoint: date
+    volumes:
+      - target:/opt/target
+volumes:
+  cargo:
+  target:
