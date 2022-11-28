@@ -1,9 +1,17 @@
+mod models;
+mod parser;
+mod schema;
+
 use chrono::{DateTime, FixedOffset};
 use clap::{Parser, Subcommand};
+use diesel::prelude::*;
+use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
 use futures::{stream, Stream, StreamExt};
 use log::{debug, trace, warn};
+use models::NewSubscription;
 use parser::{parse, Observation};
+use schema::subscriptions;
 use std::{
     cmp::Reverse,
     collections::HashSet,
@@ -20,8 +28,6 @@ use teloxide::{
     Bot, RequestError,
 };
 use tokio::time::{self, Interval, MissedTickBehavior};
-
-mod parser;
 
 type Shared<T> = Arc<Mutex<T>>;
 type Users = HashSet<ChatId>;
@@ -340,6 +346,29 @@ mod tg {
             bot.send_message(*chat, &message).await.unwrap();
         }
     }
+}
+
+struct Subscriptions(SqliteConnection);
+
+impl Subscriptions {
+    fn new(database_url: &str) -> Self {
+        let connection =
+            SqliteConnection::establish(database_url).expect("Unable to open connection");
+        Subscriptions(connection)
+    }
+
+    fn new_subscription(&mut self, user_id: u32) {
+        let subscription = NewSubscription {
+            user_id: user_id as i32,
+            created_at: 0,
+        };
+        diesel::insert_into(subscriptions::table)
+            .values(&subscription)
+            .execute(&mut self.0)
+            .expect("Error saving new subscription");
+    }
+
+    fn remove_subscription(user_id: u32) {}
 }
 
 #[cfg(test)]
