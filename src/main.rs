@@ -372,7 +372,7 @@ impl Subscriptions {
             user_id,
             created_at: 0,
         };
-        diesel::insert_into(subscriptions::table)
+        diesel::insert_or_ignore_into(subscriptions::table)
             .values(&subscription)
             .execute(&mut self.0)
             .expect("Error saving new subscription");

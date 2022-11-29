@@ -1,0 +1,1 @@
+DROP INDEX subscriptions_user_id;
