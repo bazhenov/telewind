@@ -3,7 +3,7 @@
 diesel::table! {
     subscriptions (id) {
         id -> Integer,
-        user_id -> Integer,
+        user_id -> BigInt,
         created_at -> Integer,
     }
 }

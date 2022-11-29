@@ -9,12 +9,11 @@ use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
 use futures::{stream, Stream, StreamExt};
 use log::{debug, trace, warn};
-use models::NewSubscription;
+use models::{NewSubscription, Subscription};
 use parser::{parse, Observation};
 use schema::subscriptions;
 use std::{
     cmp::Reverse,
-    collections::HashSet,
     env,
     sync::{Arc, Mutex},
     time::Duration,
@@ -30,7 +29,6 @@ use teloxide::{
 use tokio::time::{self, Interval, MissedTickBehavior};
 
 type Shared<T> = Arc<Mutex<T>>;
-type Users = HashSet<ChatId>;
 
 #[derive(Parser)]
 struct Args {
@@ -261,26 +259,32 @@ mod tg {
     use super::*;
 
     pub(crate) async fn run_bot(opts: Opts) {
+        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        let subscriptions = Subscriptions::new(&database_url);
+
         let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
         let bot = Arc::new(Bot::new(token));
-        let mut users = HashSet::new();
-        users.insert(ChatId(230741741));
-        let users = Arc::new(Mutex::new(users));
+
+        let subscriptions = Arc::new(Mutex::new(subscriptions));
 
         let subscription_loop_handle = tokio::task::Builder::new()
             .name("subscription loop")
-            .spawn(subscription_loop(bot.clone(), users.clone()))
+            .spawn(subscription_loop(bot.clone(), subscriptions.clone()))
             .unwrap();
         let parse_loop_handle = tokio::task::Builder::new()
             .name("parse and notify loop")
-            .spawn(parse_and_notify_loop(opts, bot, users))
+            .spawn(parse_and_notify_loop(opts, bot, subscriptions))
             .unwrap();
 
         parse_loop_handle.await.unwrap();
         subscription_loop_handle.await.unwrap();
     }
 
-    async fn parse_and_notify_loop(opts: Opts, bot: Arc<Bot>, users: Shared<Users>) {
+    async fn parse_and_notify_loop(
+        opts: Opts,
+        bot: Arc<Bot>,
+        subscriptions: Shared<Subscriptions>,
+    ) {
         let mut fsm = WindTracker {
             state: WindState::Low,
             avg_speed_threshold: opts.speed,
@@ -298,13 +302,19 @@ mod tg {
             trace!("Processing observation: {} ({:?})", obs, after_state);
 
             if event_fired {
-                let users = users.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+                let users = subscriptions
+                    .lock()
+                    .unwrap()
+                    .list_subscriptions()
+                    .into_iter()
+                    .map(|s| ChatId(i64::from(s.user_id)))
+                    .collect::<Vec<_>>();
                 tg::notify(&obs, &bot, &users[..]).await;
             }
         }
     }
 
-    async fn subscription_loop(bot: Arc<Bot>, users: Shared<Users>) {
+    async fn subscription_loop(bot: Arc<Bot>, users: Shared<Subscriptions>) {
         let handler =
             dptree::entry().branch(Update::filter_message().endpoint(subscription_handler));
         Dispatcher::builder(bot, handler)
@@ -317,7 +327,7 @@ mod tg {
     async fn subscription_handler(
         bot: Arc<Bot>,
         msg: Message,
-        users: Shared<Users>,
+        subscriptions: Shared<Subscriptions>,
     ) -> Result<(), RequestError> {
         debug!("{:?}", &msg);
         if let ChatKind::Private { .. } = msg.chat.kind {
@@ -325,7 +335,7 @@ mod tg {
             if let MessageKind::Common(msg) = msg.kind {
                 if let MediaKind::Text(_) = msg.media_kind {
                     debug!("Subscribing {:?}", chat_id);
-                    users.lock().unwrap().insert(chat_id);
+                    subscriptions.lock().unwrap().new_subscription(chat_id.0);
                     bot.send_message(chat_id, "You are subscribed sucessfully!")
                         .await?;
                 }
@@ -357,9 +367,9 @@ impl Subscriptions {
         Subscriptions(connection)
     }
 
-    fn new_subscription(&mut self, user_id: u32) {
+    fn new_subscription(&mut self, user_id: i64) {
         let subscription = NewSubscription {
-            user_id: user_id as i32,
+            user_id,
             created_at: 0,
         };
         diesel::insert_into(subscriptions::table)
@@ -368,7 +378,20 @@ impl Subscriptions {
             .expect("Error saving new subscription");
     }
 
-    fn remove_subscription(user_id: u32) {}
+    fn list_subscriptions(&mut self) -> Vec<Subscription> {
+        use schema::subscriptions::dsl::*;
+        subscriptions
+            .load(&mut self.0)
+            .expect("Unable to read subscriptions")
+    }
+
+    fn remove_subscription(&mut self, user_id: i64) {
+        use schema::subscriptions::dsl::{id, subscriptions};
+        diesel::delete(subscriptions)
+            .filter(id.eq(user_id as i32))
+            .execute(&mut self.0)
+            .expect("Unable to remove subscription");
+    }
 }
 
 #[cfg(test)]
