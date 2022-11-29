@@ -256,6 +256,8 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Obser
 }
 
 mod tg {
+    use teloxide::types::MediaText;
+
     use super::*;
 
     pub(crate) async fn run_bot(opts: Opts) {
@@ -333,11 +335,21 @@ mod tg {
         if let ChatKind::Private { .. } = msg.chat.kind {
             let chat_id = msg.chat.id;
             if let MessageKind::Common(msg) = msg.kind {
-                if let MediaKind::Text(_) = msg.media_kind {
-                    debug!("Subscribing {:?}", chat_id);
-                    subscriptions.lock().unwrap().new_subscription(chat_id.0);
-                    bot.send_message(chat_id, "You are subscribed sucessfully!")
-                        .await?;
+                if let MediaKind::Text(MediaText { text, .. }) = msg.media_kind {
+                    match text.as_str() {
+                        "/subscribe" => {
+                            debug!("Subscribing {:?}", chat_id);
+                            subscriptions.lock().unwrap().new_subscription(chat_id.0);
+                            bot.send_message(chat_id, "You are subscribed sucessfully!")
+                                .await?;
+                        }
+                        "/unsubscribe" => {
+                            debug!("Unsubscribing {:?}", chat_id);
+                            subscriptions.lock().unwrap().remove_subscription(chat_id.0);
+                            bot.send_message(chat_id, "You are unsubscribed").await?;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -386,9 +398,9 @@ impl Subscriptions {
     }
 
     fn remove_subscription(&mut self, user_id: i64) {
-        use schema::subscriptions::dsl::{id, subscriptions};
+        use schema::subscriptions::dsl::{subscriptions, user_id as subsciption_user_id};
         diesel::delete(subscriptions)
-            .filter(id.eq(user_id as i32))
+            .filter(subsciption_user_id.eq(user_id))
             .execute(&mut self.0)
             .expect("Unable to remove subscription");
     }
