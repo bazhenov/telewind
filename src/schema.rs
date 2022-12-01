@@ -4,6 +4,6 @@ diesel::table! {
     subscriptions (id) {
         id -> Integer,
         user_id -> BigInt,
-        created_at -> Integer,
+        created_at -> BigInt,
     }
 }

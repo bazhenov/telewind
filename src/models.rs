@@ -5,12 +5,12 @@ use crate::schema::subscriptions;
 pub struct Subscription {
     pub id: i32,
     pub user_id: i64,
-    pub created_at: i32,
+    pub created_at: i64,
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = subscriptions)]
 pub struct NewSubscription {
     pub user_id: i64,
-    pub created_at: i32,
+    pub created_at: i64,
 }

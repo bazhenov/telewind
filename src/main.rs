@@ -12,6 +12,7 @@ use log::{debug, trace, warn};
 use models::{NewSubscription, Subscription};
 use parser::{parse, Observation};
 use schema::subscriptions;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     cmp::Reverse,
     env,
@@ -380,9 +381,11 @@ impl Subscriptions {
     }
 
     fn new_subscription(&mut self, user_id: i64) {
+        let time = SystemTime::now();
+        let time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
         let subscription = NewSubscription {
             user_id,
-            created_at: 0,
+            created_at: time as i64,
         };
         diesel::insert_or_ignore_into(subscriptions::table)
             .values(&subscription)
