@@ -1,4 +1,4 @@
-.PHONE = deploy-unit-file
+.PHONE = deploy-unit-file active-unit-file
 
 deploy-unit-file:
 	scp telewind.service mvps:/etc/systemd/system/telewind.service
