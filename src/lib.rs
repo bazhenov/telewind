@@ -22,6 +22,7 @@ pub enum WindState {
 pub mod prelude {
     use thiserror::Error;
     pub type Result<T> = anyhow::Result<T>;
+    pub use log::{debug, error, info, trace, warn};
     pub use Context::*;
 
     #[derive(Error, Debug)]

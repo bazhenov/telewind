@@ -3,7 +3,6 @@ use chrono::{DateTime, FixedOffset};
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 use futures::{stream, Stream, StreamExt};
-use log::{debug, trace, warn};
 use parser::{parse, Observation};
 use std::{
     cmp::Reverse,
@@ -119,7 +118,11 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Resul
 
             let response = match read_data_using_http(&state.url).await {
                 Ok(body) => body,
-                Err(e) => return Some((Err(e), state)),
+                Err(e) => {
+                    error!("Unable to read data from remote HTTP-endpoint. We'll keep trying...");
+                    warn!("{}", e);
+                    continue;
+                }
             };
             let mut last_observations = match parse(&response) {
                 Ok(observations) => observations,
