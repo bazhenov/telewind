@@ -17,6 +17,10 @@ pub enum WindState {
     Cooldown(u8),
 }
 
+pub mod prelude {
+    pub type Result<T> = anyhow::Result<T>;
+}
+
 /// Wind state tracking FSM
 ///
 /// Implements hysterizis. Given number of observations (steps) are required for FSM to reach [`WindState::High`] state

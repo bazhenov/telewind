@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use chrono::{DateTime, FixedOffset, TimeZone};
 use chrono_tz::Asia::Vladivostok;
 use lazy_static::lazy_static;
@@ -10,6 +8,7 @@ use select::{
     predicate::{Name, Predicate},
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 lazy_static! {
     static ref WIND_DIRECTION: Regex = Regex::new("([0-9]{1,3})°").unwrap();

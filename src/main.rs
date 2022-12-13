@@ -15,18 +15,14 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use telewind::models;
-use telewind::parser;
-use telewind::schema;
-use telewind::Sector;
-use telewind::{WindState, WindTracker};
+use telewind::{models, parser, prelude::*, schema, Sector, WindState, WindTracker};
 use teloxide::{
     dispatching::UpdateFilterExt,
     dptree::{self, deps},
     prelude::Dispatcher,
     requests::Requester,
     types::{ChatId, ChatKind, MediaKind, Message, MessageKind, Update},
-    Bot, RequestError,
+    Bot,
 };
 use tokio::time::{self, Interval, MissedTickBehavior};
 
@@ -59,7 +55,7 @@ enum Action {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
     if dotenv::var("TOKIO_CONSOLE_SUBSCRIBER").ok().is_some() {
@@ -70,13 +66,14 @@ async fn main() {
     let args = Args::parse();
 
     match args.action {
-        Action::Parse(opts) => run_parse(&opts).await,
-        Action::RunTelegramBot(opts) => tg::run_bot(opts).await,
+        Action::Parse(opts) => run_parse(&opts).await?,
+        Action::RunTelegramBot(opts) => tg::run_bot(opts).await?,
     }
+    Ok(())
 }
 
-async fn run_parse(opts: &Opts) {
-    let body = reqwest::get(&opts.url).await.unwrap().text().await.unwrap();
+async fn run_parse(opts: &Opts) -> Result<()> {
+    let body = reqwest::get(&opts.url).await?.text().await?;
 
     let mut fsm = WindTracker {
         state: WindState::Low,
@@ -93,12 +90,14 @@ async fn run_parse(opts: &Opts) {
         let after_state = fsm.state();
         println!("{observation} {event_fired:>6}    {after_state:?}")
     }
+
+    Ok(())
 }
 
 /// Stream of new observations realtime
 ///
 /// Parse remote URL with given interval and return new observations one by one
-fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Observation> {
+fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Result<Observation>> {
     struct State {
         url: String,
         interval: Interval,
@@ -107,19 +106,15 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Obser
         last_parse_time: Option<DateTime<FixedOffset>>,
     }
 
-    async fn next_observation(mut state: State) -> Option<(Observation, State)> {
+    async fn next_observation(mut state: State) -> Option<(Result<Observation>, State)> {
         loop {
             if let Some(observation) = state.observations.pop() {
-                return Some((observation, state));
+                return Some((Ok(observation), state));
             }
 
             state.interval.tick().await;
-            let body = reqwest::get(&state.url)
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap();
+            let body = reqwest::get(&state.url).await.unwrap();
+            let body = body.text().await.unwrap();
             let mut last_observations = parse(&body);
             if !last_observations.is_empty() {
                 last_observations.sort_by_key(|o| Reverse(o.time));
@@ -156,7 +151,7 @@ mod tg {
     use super::*;
     use teloxide::types::MediaText;
 
-    pub(crate) async fn run_bot(opts: Opts) {
+    pub(crate) async fn run_bot(opts: Opts) -> Result<()> {
         let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
         let subscriptions = Subscriptions::new(&database_url);
 
@@ -167,22 +162,22 @@ mod tg {
 
         let subscription_loop_handle = tokio::task::Builder::new()
             .name("subscription loop")
-            .spawn(subscription_loop(bot.clone(), subscriptions.clone()))
-            .unwrap();
+            .spawn(subscription_loop(bot.clone(), subscriptions.clone()))?;
         let parse_loop_handle = tokio::task::Builder::new()
             .name("parse and notify loop")
-            .spawn(parse_and_notify_loop(opts, bot, subscriptions))
-            .unwrap();
+            .spawn(parse_and_notify_loop(opts, bot, subscriptions))?;
 
-        parse_loop_handle.await.unwrap();
-        subscription_loop_handle.await.unwrap();
+        parse_loop_handle.await??;
+        subscription_loop_handle.await?;
+
+        Ok(())
     }
 
     async fn parse_and_notify_loop(
         opts: Opts,
         bot: Arc<Bot>,
         subscriptions: Shared<Subscriptions>,
-    ) {
+    ) -> Result<()> {
         let mut fsm = WindTracker {
             state: WindState::Low,
             avg_speed_threshold: opts.speed,
@@ -195,6 +190,7 @@ mod tg {
 
         let mut observations = Box::pin(observation_stream(&opts.url, interval));
         while let Some(obs) = observations.next().await {
+            let obs = obs?;
             let event_fired = fsm.step(&obs);
             let after_state = fsm.state();
             trace!("Processing observation: {} ({:?})", obs, after_state);
@@ -210,6 +206,7 @@ mod tg {
                 tg::notify(&obs, &bot, &users[..]).await;
             }
         }
+        Ok(())
     }
 
     async fn subscription_loop(bot: Arc<Bot>, users: Shared<Subscriptions>) {
@@ -226,7 +223,7 @@ mod tg {
         bot: Arc<Bot>,
         msg: Message,
         subscriptions: Shared<Subscriptions>,
-    ) -> Result<(), RequestError> {
+    ) -> Result<()> {
         debug!("{:?}", &msg);
         if let ChatKind::Private { .. } = msg.chat.kind {
             let chat_id = msg.chat.id;
