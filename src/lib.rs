@@ -1,11 +1,13 @@
-pub mod models;
+mod models;
 pub mod parser;
-pub mod schema;
+mod schema;
 
+use anyhow::Context;
 use diesel::prelude::*;
 use diesel::{Connection, SqliteConnection};
 use models::{NewSubscription, Subscription};
 use parser::Observation;
+use prelude::*;
 use schema::subscriptions;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +20,24 @@ pub enum WindState {
 }
 
 pub mod prelude {
+    use thiserror::Error;
     pub type Result<T> = anyhow::Result<T>;
+    pub use Context::*;
+
+    #[derive(Error, Debug)]
+    pub enum Context {
+        #[error("Failed to get observations from endpoint: {0}")]
+        ObservationsEndpointFailed(String),
+
+        #[error("Opening sqlite database: {0}")]
+        OpeningSqliteDatabase(String),
+
+        #[error("Saving subscription for user {0}")]
+        SavingSubscription(i64),
+
+        #[error("Removing subscription for user {0}")]
+        RemovingSubscription(i64),
+    }
 }
 
 /// Wind state tracking FSM
@@ -121,15 +140,15 @@ impl Sector {
 pub struct Subscriptions(pub SqliteConnection);
 
 impl Subscriptions {
-    pub fn new(database_url: &str) -> Self {
-        let connection =
-            SqliteConnection::establish(database_url).expect("Unable to open connection");
-        Subscriptions(connection)
+    pub fn new(database_url: &str) -> Result<Self> {
+        let connection = SqliteConnection::establish(database_url)
+            .context(OpeningSqliteDatabase(database_url.to_string()))?;
+        Ok(Subscriptions(connection))
     }
 
-    pub fn new_subscription(&mut self, user_id: i64) {
+    pub fn new_subscription(&mut self, user_id: i64) -> Result<()> {
         let time = SystemTime::now();
-        let time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let time = time.duration_since(UNIX_EPOCH)?.as_secs();
         let subscription = NewSubscription {
             user_id,
             created_at: time as i64,
@@ -137,22 +156,22 @@ impl Subscriptions {
         diesel::insert_or_ignore_into(subscriptions::table)
             .values(&subscription)
             .execute(&mut self.0)
-            .expect("Error saving new subscription");
+            .context(SavingSubscription(user_id))?;
+        Ok(())
     }
 
-    pub fn list_subscriptions(&mut self) -> Vec<Subscription> {
+    pub fn list_subscriptions(&mut self) -> Result<Vec<Subscription>> {
         use schema::subscriptions::dsl::*;
-        subscriptions
-            .load(&mut self.0)
-            .expect("Unable to read subscriptions")
+        Ok(subscriptions.load(&mut self.0)?)
     }
 
-    pub fn remove_subscription(&mut self, user_id: i64) {
+    pub fn remove_subscription(&mut self, user_id: i64) -> Result<()> {
         use schema::subscriptions::dsl::{subscriptions, user_id as subsciption_user_id};
         diesel::delete(subscriptions)
             .filter(subsciption_user_id.eq(user_id))
             .execute(&mut self.0)
-            .expect("Unable to remove subscription");
+            .context(RemovingSubscription(user_id))?;
+        Ok(())
     }
 }
 

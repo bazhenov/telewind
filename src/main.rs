@@ -1,21 +1,17 @@
+use anyhow::Context;
 use chrono::{DateTime, FixedOffset};
 use clap::{Parser, Subcommand};
-use diesel::prelude::*;
-use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
 use futures::{stream, Stream, StreamExt};
 use log::{debug, trace, warn};
-use models::{NewSubscription, Subscription};
 use parser::{parse, Observation};
-use schema::subscriptions;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     cmp::Reverse,
     env,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use telewind::{models, parser, prelude::*, schema, Sector, WindState, WindTracker};
+use telewind::{parser, prelude::*, Sector, WindState, WindTracker};
 use teloxide::{
     dispatching::UpdateFilterExt,
     dptree::{self, deps},
@@ -106,6 +102,13 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Resul
         last_parse_time: Option<DateTime<FixedOffset>>,
     }
 
+    async fn read_data_using_http(url: &str) -> Result<String> {
+        let body = reqwest::get(url)
+            .await
+            .context(ObservationsEndpointFailed(url.to_string()))?;
+        Ok(body.text().await?)
+    }
+
     async fn next_observation(mut state: State) -> Option<(Result<Observation>, State)> {
         loop {
             if let Some(observation) = state.observations.pop() {
@@ -113,9 +116,12 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Resul
             }
 
             state.interval.tick().await;
-            let body = reqwest::get(&state.url).await.unwrap();
-            let body = body.text().await.unwrap();
-            let mut last_observations = parse(&body);
+
+            let response = match read_data_using_http(&state.url).await {
+                Ok(body) => body,
+                Err(e) => return Some((Err(e), state)),
+            };
+            let mut last_observations = parse(&response);
             if !last_observations.is_empty() {
                 last_observations.sort_by_key(|o| Reverse(o.time));
 
@@ -149,13 +155,14 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Resul
 
 mod tg {
     use super::*;
+    use telewind::Subscriptions;
     use teloxide::types::MediaText;
 
     pub(crate) async fn run_bot(opts: Opts) -> Result<()> {
-        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
-        let subscriptions = Subscriptions::new(&database_url);
+        let database_url = env::var("DATABASE_URL").context("DATABASE_URL not set")?;
+        let subscriptions = Subscriptions::new(&database_url)?;
 
-        let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
+        let token = env::var("TELEGRAM_BOT_TOKEN").context("TELEGRAM_BOT_TOKEN not set")?;
         let bot = Arc::new(Bot::new(token));
 
         let subscriptions = Arc::new(Mutex::new(subscriptions));
@@ -199,11 +206,11 @@ mod tg {
                 let users = subscriptions
                     .lock()
                     .unwrap()
-                    .list_subscriptions()
+                    .list_subscriptions()?
                     .into_iter()
-                    .map(|s| ChatId(i64::from(s.user_id)))
+                    .map(|s| ChatId(s.user_id))
                     .collect::<Vec<_>>();
-                tg::notify(&obs, &bot, &users[..]).await;
+                tg::notify(&obs, &bot, &users[..]).await?;
             }
         }
         Ok(())
@@ -232,13 +239,16 @@ mod tg {
                     match text.as_str() {
                         "/subscribe" => {
                             debug!("Subscribing {:?}", chat_id);
-                            subscriptions.lock().unwrap().new_subscription(chat_id.0);
+                            subscriptions.lock().unwrap().new_subscription(chat_id.0)?;
                             bot.send_message(chat_id, "You are subscribed sucessfully!")
                                 .await?;
                         }
                         "/unsubscribe" => {
                             debug!("Unsubscribing {:?}", chat_id);
-                            subscriptions.lock().unwrap().remove_subscription(chat_id.0);
+                            subscriptions
+                                .lock()
+                                .unwrap()
+                                .remove_subscription(chat_id.0)?;
                             bot.send_message(chat_id, "You are unsubscribed").await?;
                         }
                         _ => {}
@@ -250,7 +260,11 @@ mod tg {
         Ok(())
     }
 
-    pub(crate) async fn notify(observation: &Observation, bot: &Bot, users: &[ChatId]) {
+    pub(crate) async fn notify(
+        observation: &Observation,
+        bot: &Bot,
+        users: &[ChatId],
+    ) -> Result<()> {
         warn!(
             "Wind is growing up: {observation}. Sending notifications to {} users",
             users.len()
@@ -258,45 +272,9 @@ mod tg {
 
         let message = format!("Wind is growing up: {observation}");
         for chat in users.iter() {
-            bot.send_message(*chat, &message).await.unwrap();
+            bot.send_message(*chat, &message).await?;
         }
-    }
-}
 
-struct Subscriptions(SqliteConnection);
-
-impl Subscriptions {
-    fn new(database_url: &str) -> Self {
-        let connection =
-            SqliteConnection::establish(database_url).expect("Unable to open connection");
-        Subscriptions(connection)
-    }
-
-    fn new_subscription(&mut self, user_id: i64) {
-        let time = SystemTime::now();
-        let time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let subscription = NewSubscription {
-            user_id,
-            created_at: time as i64,
-        };
-        diesel::insert_or_ignore_into(subscriptions::table)
-            .values(&subscription)
-            .execute(&mut self.0)
-            .expect("Error saving new subscription");
-    }
-
-    fn list_subscriptions(&mut self) -> Vec<Subscription> {
-        use schema::subscriptions::dsl::*;
-        subscriptions
-            .load(&mut self.0)
-            .expect("Unable to read subscriptions")
-    }
-
-    fn remove_subscription(&mut self, user_id: i64) {
-        use schema::subscriptions::dsl::{subscriptions, user_id as subsciption_user_id};
-        diesel::delete(subscriptions)
-            .filter(subsciption_user_id.eq(user_id))
-            .execute(&mut self.0)
-            .expect("Unable to remove subscription");
+        Ok(())
     }
 }
