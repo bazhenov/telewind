@@ -79,7 +79,7 @@ async fn run_parse(opts: &Opts) -> Result<()> {
         avg_speed_threshold: opts.speed,
     };
 
-    let mut observations = parse(&body);
+    let mut observations = parse(&body)?;
     observations.reverse();
     for observation in observations {
         let event_fired = fsm.step(&observation);
@@ -121,7 +121,10 @@ fn observation_stream(url: &str, interval: Interval) -> impl Stream<Item = Resul
                 Ok(body) => body,
                 Err(e) => return Some((Err(e), state)),
             };
-            let mut last_observations = parse(&response);
+            let mut last_observations = match parse(&response) {
+                Ok(observations) => observations,
+                Err(e) => return Some((Err(e), state)),
+            };
             if !last_observations.is_empty() {
                 last_observations.sort_by_key(|o| Reverse(o.time));
 
