@@ -6,7 +6,7 @@ After=docker
 [Service]
 EnvironmentFile=/root/.env
 ExecStartPre=docker pull ghcr.io/bazhenov/telewind:${IMAGE_TAG}
-ExecStart=docker run --name telewind --rm -i --env-file=/root/.env ghcr.io/bazhenov/telewind:${IMAGE_TAG} run-telegram-bot
+ExecStart=docker run --name telewind --rm -i -v telewind_opt:/var/db --env-file=/root/.env ghcr.io/bazhenov/telewind:${IMAGE_TAG} run-telegram-bot
 ExecStop=docker stop telewind
 
 [Install]
