@@ -144,7 +144,11 @@ impl Subscriptions {
     pub fn new(database_url: &str) -> Result<Self> {
         let connection = SqliteConnection::establish(database_url)
             .context(OpeningSqliteDatabase(database_url.to_string()))?;
-        Ok(Subscriptions(connection))
+        Self::with_connection(connection)
+    }
+
+    pub fn with_connection(connection: SqliteConnection) -> Result<Self> {
+        Ok(Self(connection))
     }
 
     pub fn new_subscription(&mut self, user_id: i64) -> Result<()> {
