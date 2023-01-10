@@ -11,6 +11,12 @@ services:
         source: ./src
         target: /opt/src
       - type: bind
+        source: ./tests
+        target: /opt/tests
+      - type: bind
+        source: ./migrations
+        target: /opt/migrations
+      - type: bind
         source: ./Cargo.toml
         target: /opt/Cargo.toml
       - type: bind
@@ -21,9 +27,11 @@ services:
         target: /opt/.cargo
   dummy:
     image: alpine
-    entrypoint: date
+    entrypoint: sh
+    working_dir: /opt
     volumes:
       - target:/opt/target
+      - cargo:/opt/cargo
 volumes:
   cargo:
   target:
